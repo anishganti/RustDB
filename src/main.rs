@@ -1,9 +1,9 @@
 mod utils;
-use utils::btree::BTreeNode;
+use utils::btree::BTree;
 use std::io;
 
 fn main() {
-    let mut root = BTreeNode::new();
+    let mut database = BTree::new();
 
     println!("Please type something, or stop to escape:");
     let mut input_string = String::new();
@@ -23,12 +23,13 @@ fn main() {
         let mut args = trimmed_input.split_whitespace();
         let op = args.next().unwrap_or(""); 
         let key = args.next().unwrap_or("").parse::<usize>().unwrap_or(1);
-        let value: usize = 0;
-        let result = match op {
-            "read"  => root.read(key),
-            "write" => root.write(key, value),
-            _ => Some(3),
-        };
+        let mut result = None;
+
+        if op == "read" {
+            result = database.read(key);
+        } else if op == "write" {
+            database = database.write(key, key);
+        } 
 
         match result {
             Some(value) => println!("Result: {}", value),
@@ -38,3 +39,5 @@ fn main() {
 
     println!("See you later!");
 }
+
+
