@@ -2,12 +2,58 @@ const BRANCHING_FACTOR: u16 = 500;
 const LEVELS: usize = 3;
 const MAX_PAGE_BYTES: usize = 4096;
 
+extern crate linked_hash_map;
+
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write, Seek};
 use std::convert::TryInto;
 
+use self::linked_hash_map::LinkedHashMap;
+
+
 //logic. 
+pub struct LRUCache {
+    map: LinkedHashMap<u32, BTreeNode>
+}
+
+impl LRUCache {
+    fn new() -> Self {
+       Self { 
+        map : LinkedHashMap::new()
+       }
+    }
+
+    fn insert(&mut self, key: u32, val: BTreeNode){
+        if(self.map.contains_key(&key)){
+            self.map.remove(&key);
+        } else if (self.map.len() == 10){
+            self.map.pop_back();
+        } 
+
+        self.map.insert(key, val);
+    }
+
+    fn get(&self, key: u32) -> &BTreeNode{
+        /*let old_node = self.map.get(&key).unwrap();
+        let old_keys = Vec::new();
+        let old_children = Vec::new();
+        let old_vals = Vec::new();
+
+
+        let new_node = BTreeNode::new_from_params(old_node.id, 
+            old_node.leaf, 
+            old_node.num_keys, 
+            old_node.keys,
+            old_node.children, 
+            old_node.vals); */
+
+        self.map.get(&key).unwrap()
+        
+    }
+
+}
+
 pub struct BTreeNode {
     id: u32, 
     leaf: u8, 
@@ -25,6 +71,8 @@ pub struct BTreeNode {
 
 pub struct BTree {
      file : File,
+     wal : File, 
+     cache : LRUCache,
      num_nodes : u64
 }
 
@@ -69,17 +117,28 @@ impl BTreeNode {
 }
 
 impl BTree{
-    pub fn new(file_path: &str) -> io::Result<BTree> {
+    pub fn new(file_path: &str, wal_path: &str) -> io::Result<BTree> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true) // <--------- this
             .open(file_path)?;
 
+        let wal = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(wal_path)?;
+
+        let cache = LRUCache::new();
         let metadata = file.metadata()?;
         let num_nodes = metadata.len()/4096;
 
-        Ok(Self { file, num_nodes})   
+        Ok(Self { file, wal, cache, num_nodes})   
+    }
+
+    //Encodes key into a number to handle different input types. 
+    fn encode_key(&self, key: &str){
+
     }
 
     fn read_node_from_file(&mut self, offset: usize) -> Option<BTreeNode> {
@@ -96,6 +155,11 @@ impl BTree{
         self.file.seek(io::SeekFrom::Start(offset)); 
         self.file.write_all(&buffer);
     }
+
+    fn write_to_wal(&mut self, key: u16, val:u16){
+        self.wal.write_all(&key.to_le_bytes()).unwrap();
+        self.wal.write_all(&val.to_le_bytes()).unwrap();
+    }   
 
     fn deserialize(&self, buf: &[u8; 4096]) -> BTreeNode {
         let id = u32::from_le_bytes(buf[0..4].try_into().unwrap());
@@ -171,6 +235,8 @@ impl BTree{
 
 
     pub fn write(&mut self, key: u16, val: u16) {
+        self.write_to_wal(key, val);
+
         //Load the root node from the file. The root will always be at the start so the offset is 0. 
         let mut offset: u32 = 0;
         let mut stack = vec![];

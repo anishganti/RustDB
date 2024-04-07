@@ -3,22 +3,34 @@ use utils::btree::BTree;
 use std::fs::File;
 use std::io::{self, Write};
 
-//items todo 
-// fix indexing
-// split pages
-// write tree to file/disk and load from disk upon startup
-// on-disk persistence/serialization/deserialize 
-// test cases
+//  writing different types of data
+//  imposing key order for different key types 
+//  in-memory cache and eviction 
+//  test split pages
+//  removing nodes
+//  include write ahead log (WAL)
+
+// replicas
+
+// partitions 
+
 
 fn main() {
-    let file_path = "/Users/anishganti/RustDB/src/test2.bin";
+    let file_path = "/Users/anishganti/RustDB/src/test.bin";
+    let wal_path = "/Users/anishganti/RustDB/src/test_wal.bin";
 
     match create_binary_file(file_path) {
-        Ok(_) => println!("Binary file '{}' created successfully.", file_path),
-        Err(err) => eprintln!("Error creating binary file: {}", err),
+        Ok(_) => println!("New database '{}' created successfully.", file_path),
+        Err(err) => eprintln!("Error creating database file: {}", err),
     }
 
-    let mut database = match BTree::new(file_path) {
+    match create_binary_file(wal_path) {
+        Ok(_) => println!("New write ahead log (WAL) '{}' created successfully.", file_path),
+        Err(err) => eprintln!("Error creating WAL file: {}", err),
+    }
+
+
+    let mut database = match BTree::new(file_path,  wal_path) {
         Ok(btree) => btree,
         Err(err) => {
             eprintln!("Error creating BTree instance: {}", err);

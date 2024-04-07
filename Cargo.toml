@@ -3,3 +3,6 @@
 name = "rust_db"
 version = "0.0.1"
 authors = [ "Anish Ganti <anishgantis@utexas.edu>" ]
+
+[dependencies]
+linked-hash-map = "0.5.6"
