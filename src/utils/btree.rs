@@ -4,6 +4,7 @@ const MAX_PAGE_BYTES: usize = 4096;
 
 extern crate linked_hash_map;
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write, Seek};
@@ -35,21 +36,16 @@ impl LRUCache {
     }
 
     fn get(&self, key: u32) -> &BTreeNode{
-        /*let old_node = self.map.get(&key).unwrap();
-        let old_keys = Vec::new();
-        let old_children = Vec::new();
-        let old_vals = Vec::new();
-
-
-        let new_node = BTreeNode::new_from_params(old_node.id, 
-            old_node.leaf, 
-            old_node.num_keys, 
-            old_node.keys,
-            old_node.children, 
-            old_node.vals); */
-
         self.map.get(&key).unwrap()
-        
+    }
+
+    fn get_mut(&mut self, key: u32) -> Option<&mut BTreeNode>{
+        self.map.get_mut(&key)
+    }
+
+
+    fn contains_key(&self, key: u32) -> bool {
+        self.map.contains_key(&key)
     }
 
 }
@@ -68,13 +64,6 @@ pub struct BTreeNode {
 //open the file
 //if user asks for a read request
 //call read(key, file)
-
-pub struct BTree {
-     file : File,
-     wal : File, 
-     cache : LRUCache,
-     num_nodes : u64
-}
 
 impl BTreeNode {
     pub fn new() -> Self {
@@ -100,6 +89,49 @@ impl BTreeNode {
         }
     }
 
+    fn write_node_to_file(&self, file: &mut File) {
+        let offset: u64 = (4096*(self.id)).into();
+        let buffer = self.serialize();
+        file.seek(io::SeekFrom::Start(offset)); 
+        file.write_all(&buffer);
+    }
+
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+
+        buffer.write_all(&self.id.to_le_bytes()).unwrap();
+        buffer.write_all(&self.leaf.to_le_bytes()).unwrap();
+        buffer.write_all(&self.num_keys.to_le_bytes()).unwrap();
+
+        for key in &self.keys {
+            let bytes = key.to_le_bytes();
+            buffer.write_all(&bytes).unwrap();
+        }
+
+        match self.leaf == 1 {
+            true => {
+                for val in &self.vals {
+                    let bytes = val.to_le_bytes();
+                    buffer.write_all(&bytes).unwrap();
+                }        
+            }, 
+
+            false => {
+                for child in &self.children {
+                    let bytes = child.to_le_bytes();
+                    buffer.write_all(&bytes).unwrap();
+                }        
+
+            }
+        }
+
+        let padding_len = 4096 - buffer.len();
+        buffer.extend_from_slice(&vec![0u8; padding_len]);  
+
+        buffer      
+    }
+
+
     pub fn search(&self, key: u16) -> usize {
         if self.keys.len() == 0 {
             return 0
@@ -113,7 +145,14 @@ impl BTreeNode {
 
         self.keys.len()
     }
+}
 
+pub struct BTree {
+    file : File,
+    wal : File, 
+    cache : LRUCache,
+    dirty_pages : HashMap<u32, BTreeNode>, 
+    num_nodes : u64
 }
 
 impl BTree{
@@ -130,10 +169,11 @@ impl BTree{
             .open(wal_path)?;
 
         let cache = LRUCache::new();
+        let dirty_pages = HashMap::new();
         let metadata = file.metadata()?;
         let num_nodes = metadata.len()/4096;
 
-        Ok(Self { file, wal, cache, num_nodes})   
+        Ok(Self { file, wal, cache, dirty_pages, num_nodes})   
     }
 
     //Encodes key into a number to handle different input types. 
@@ -141,20 +181,42 @@ impl BTree{
 
     }
 
+    fn get(&mut self, key: u32) -> &BTreeNode {
+        if self.cache.contains_key(key){
+            return self.cache.get(key);
+        } else if self.dirty_pages.contains_key(&key) {
+            return self.dirty_pages.get(&key).unwrap();
+        } else {
+            let node = self.read_node_from_file(key.try_into().unwrap()).unwrap();
+            self.cache.insert(key, node);
+            return self.cache.get(key);
+        }
+    }
+
+    fn get_mut(&mut self, key: u32) -> &mut BTreeNode {
+        if self.cache.contains_key(key){
+            return self.cache.get_mut(key).unwrap();
+        } else if self.dirty_pages.contains_key(&key) {
+            return self.dirty_pages.get_mut(&key).unwrap();
+        } else {
+            let node = self.read_node_from_file(key.try_into().unwrap()).unwrap();
+            self.cache.insert(key, node);
+            return self.cache.get_mut(key).unwrap();
+        }
+    }
+
+    fn get_object(&mut self, key: u32) -> BTreeNode {
+        return self.cache.map.remove(&key).unwrap();
+    }
+
+
     fn read_node_from_file(&mut self, offset: usize) -> Option<BTreeNode> {
         let mut buf = [0u8; 4096]; //
-        self.file.seek(io::SeekFrom::Start(0)); 
+        self.file.seek(io::SeekFrom::Start(offset.try_into().unwrap())); 
         self.file.read_exact(&mut buf);
         let node = self.deserialize(& buf);
         Some(node)
     }    
-
-    fn write_node_to_file(&mut self, node: &BTreeNode) {
-        let offset: u64 = (4096*(node.id)).into();
-        let buffer = self.serialize(&node);
-        self.file.seek(io::SeekFrom::Start(offset)); 
-        self.file.write_all(&buffer);
-    }
 
     fn write_to_wal(&mut self, key: u16, val:u16){
         self.wal.write_all(&key.to_le_bytes()).unwrap();
@@ -198,42 +260,6 @@ impl BTree{
         node
     }       
 
-    pub fn serialize(&self, node: &BTreeNode) -> Vec<u8> {
-        let mut buffer = Vec::new();
-
-        buffer.write_all(&node.id.to_le_bytes()).unwrap();
-        buffer.write_all(&node.leaf.to_le_bytes()).unwrap();
-        buffer.write_all(&node.num_keys.to_le_bytes()).unwrap();
-
-        for &key in &node.keys {
-            let bytes = key.to_le_bytes();
-            buffer.write_all(&bytes).unwrap();
-        }
-
-        match node.leaf == 1 {
-            true => {
-                for &val in &node.vals {
-                    let bytes = val.to_le_bytes();
-                    buffer.write_all(&bytes).unwrap();
-                }        
-            }, 
-
-            false => {
-                for &child in &node.children {
-                    let bytes = child.to_le_bytes();
-                    buffer.write_all(&bytes).unwrap();
-                }        
-
-            }
-        }
-
-        let padding_len = 4096 - buffer.len();
-        buffer.extend_from_slice(&vec![0u8; padding_len]);  
-
-        buffer      
-    }
-
-
     pub fn write(&mut self, key: u16, val: u16) {
         self.write_to_wal(key, val);
 
@@ -243,23 +269,25 @@ impl BTree{
 
         loop {
             stack.push(offset);
-            let mut cur_node = self.read_node_from_file(offset.try_into().unwrap()).unwrap();
+            let cur_node = self.get_mut(offset);
             let index:usize = cur_node.search(key);
 
             if cur_node.leaf == 1{
-                let numk : usize = cur_node.num_keys.into();
-                if numk > index && cur_node.keys[index] == key {
-                    cur_node.vals[index] = val;
+                //No longer just borrowing the object, we need owernship as the obejct moves from cache to buffer. 
+                let mut removed_node = self.get_object(offset);
+                let numk : usize = removed_node.num_keys.into();
+                if numk > index && removed_node.keys[index] == key {
+                    removed_node.vals[index] = val;
                 } else {
-                    cur_node.keys.insert(index.try_into().unwrap(), key);
-                    cur_node.vals.insert(index.try_into().unwrap(), val);
-                    cur_node.num_keys += 1;
+                    removed_node.keys.insert(index.try_into().unwrap(), key);
+                    removed_node.vals.insert(index.try_into().unwrap(), val);
+                    removed_node.num_keys += 1;
                 }
 
-                if cur_node.num_keys == BRANCHING_FACTOR {
+                if removed_node.num_keys == BRANCHING_FACTOR {
                     self.rebalance(stack);
                 } else {
-                    self.write_node_to_file(&cur_node);
+                    self.dirty_pages.insert(offset, removed_node);
                 }
 
                 break;
@@ -270,9 +298,14 @@ impl BTree{
     }
 
     fn swap(&mut self, new_root : BTreeNode){
-        let old_root = self.read_node_from_file(0).unwrap();
-        self.write_node_to_file(&new_root);
-        self.write_node_to_file(&old_root);
+        //let old_root = self.get(0);
+        //old_root.write_node_to_file(file);
+    }
+
+    fn flush(&mut self){
+        for node in self.dirty_pages.values_mut() {
+            node.write_node_to_file(&mut self.file);
+        }
     }
 
     fn rebalance (&mut self, mut stack: Vec<u32>) {
@@ -281,7 +314,8 @@ impl BTree{
 
         loop {
             let offset = stack.pop().unwrap();
-            let current_node = self.read_node_from_file(offset.try_into().unwrap());
+
+            let current_node = self.cache.get_mut(offset);
 
             if current_node.is_none() && split_nodes.is_none() {
                 break;
@@ -298,7 +332,7 @@ impl BTree{
                 break;
             } 
 
-            let mut unwrapped_current_node = current_node.unwrap();
+            let unwrapped_current_node = current_node.unwrap();
 
             if !split_nodes.is_none() {
                 //Node reached capacity and was split so the the range of keys in the parent 
@@ -316,7 +350,7 @@ impl BTree{
                 unwrapped_current_node.keys.insert(index, insert_key.unwrap());
                 unwrapped_current_node.children.insert(index+1, split_nodes.unwrap()[1]);
                 unwrapped_current_node.num_keys +=1 ;
-                self.write_node_to_file(&unwrapped_current_node);
+                unwrapped_current_node.write_node_to_file(&mut self.file);
             }
 
             if unwrapped_current_node.num_keys == BRANCHING_FACTOR {
@@ -342,8 +376,8 @@ impl BTree{
                     new_node_vals);
 
                 self.num_nodes +=1;
-                self.write_node_to_file(&unwrapped_current_node);
-                self.write_node_to_file(&new_node);
+                unwrapped_current_node.write_node_to_file(&mut self.file);
+                new_node.write_node_to_file(&mut self.file);
 
                 split_nodes = Some(vec![unwrapped_current_node.id, new_node.id]);
                 insert_key = Some(unwrapped_current_node.keys[0]);
@@ -357,9 +391,11 @@ impl BTree{
 
     pub fn read(&mut self, key: u16) -> Option<u16> {
         let mut offset: u32 = 0;
+
         loop {
-            
-            let cur_node = self.read_node_from_file(offset.try_into().unwrap()).unwrap();
+
+            let cur_node: &BTreeNode = self.get(offset);
+
             let index: usize = cur_node.search(key);
 
             if cur_node.leaf == 1{
