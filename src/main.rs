@@ -5,13 +5,9 @@ use std::io::{self, Write};
 
 //  writing different types of data
 //  imposing key order for different key types 
-//  in-memory cache and eviction 
 //  test split pages
 //  removing nodes
-//  include write ahead log (WAL)
-
 // replicas
-
 // partitions 
 
 
@@ -19,7 +15,7 @@ fn main() {
     let file_path = "/Users/anishganti/RustDB/src/test.bin";
     let wal_path = "/Users/anishganti/RustDB/src/test_wal.bin";
 
-    match create_binary_file(file_path) {
+    /*match create_binary_file(file_path) {
         Ok(_) => println!("New database '{}' created successfully.", file_path),
         Err(err) => eprintln!("Error creating database file: {}", err),
     }
@@ -27,9 +23,9 @@ fn main() {
     match create_binary_file(wal_path) {
         Ok(_) => println!("New write ahead log (WAL) '{}' created successfully.", file_path),
         Err(err) => eprintln!("Error creating WAL file: {}", err),
-    }
+    }*/
 
-
+    // Load the database by opening the file and WAL from disk. 
     let mut database = match BTree::new(file_path,  wal_path) {
         Ok(btree) => btree,
         Err(err) => {
@@ -37,6 +33,9 @@ fn main() {
             return;
         }
     };
+
+    // Recover any lost changes made before. 
+    database.recover();
     
     println!("Please type something, or stop to escape:");
     let mut input_string = String::new();
@@ -49,6 +48,7 @@ fn main() {
         let trimmed_input = input_string.trim();
 
         if trimmed_input == "stop" {
+            database.flush();
             break;
         }
 

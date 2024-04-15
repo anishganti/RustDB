@@ -9,11 +9,11 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write, Seek};
 use std::convert::TryInto;
-
 use self::linked_hash_map::LinkedHashMap;
 
-
-//logic. 
+/// An in-memory cache to hold the most recently accessed pages. 
+/// and reduce the number of I/O operations. Uses Least Recently Used 
+/// method to evict old pages if the cache is full. 
 pub struct LRUCache {
     map: LinkedHashMap<u32, BTreeNode>
 }
@@ -50,6 +50,8 @@ impl LRUCache {
 
 }
 
+/// The structure of the a single node (page) within the overall B-Tree. 
+/// Contains either the key-value stores (if leaf node) or key ranges with locations to the child nodes. 
 pub struct BTreeNode {
     id: u32, 
     leaf: u8, 
@@ -60,12 +62,8 @@ pub struct BTreeNode {
     vals: Vec<u16>, 
 }
 
-//user starts session
-//open the file
-//if user asks for a read request
-//call read(key, file)
-
 impl BTreeNode {
+    /// Create a new leaf page (node) with empty lists. 
     pub fn new() -> Self {
         Self {
             id: 0,
@@ -77,6 +75,7 @@ impl BTreeNode {
         }
     }
 
+    /// Create a new node given all possible parameters. 
     pub fn new_from_params(id:u32, leaf:u8, num_keys:u16, keys: Vec<u16>, 
                                 children: Vec<u32>, vals: Vec<u16> ) -> Self {
         Self {
@@ -89,6 +88,10 @@ impl BTreeNode {
         }
     }
 
+
+    /// Persists the current node to the disk. Borrows the file from the B-Tree itself and 
+    /// calculates the file position from using the node's id and the fact that a node 
+    /// is limited to be at most 4096 bytes. 
     fn write_node_to_file(&self, file: &mut File) {
         let offset: u64 = (4096*(self.id)).into();
         let buffer = self.serialize();
@@ -96,6 +99,7 @@ impl BTreeNode {
         file.write_all(&buffer);
     }
 
+    /// Serializes the node into a sequence of bytes since the database is persisted as a binary file. 
     pub fn serialize(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
 
@@ -131,7 +135,11 @@ impl BTreeNode {
         buffer      
     }
 
-
+    /// Given an input key, searches through the node's key array for the key and returns the index if found. 
+    /// If the key isn't found, returns the index of the first value greater than the key. 
+    /// 
+    /// Idea is that either key[i] pairs with val[i] OR 
+    /// The child node at children[0] points to the nodes storing all keys less than key[i]. 
     pub fn search(&self, key: u16) -> usize {
         if self.keys.len() == 0 {
             return 0
@@ -147,6 +155,7 @@ impl BTreeNode {
     }
 }
 
+/// Main database structure that holds the cache for easy access and the file for disk reads/writes. 
 pub struct BTree {
     file : File,
     wal : File, 
@@ -156,6 +165,8 @@ pub struct BTree {
 }
 
 impl BTree{
+    /// Creates new BTree by opening the file on disk as well as creating new buffers 
+    /// for the write-ahead log (WAL), and cache. 
     pub fn new(file_path: &str, wal_path: &str) -> io::Result<BTree> {
         let file = OpenOptions::new()
             .read(true)
@@ -176,11 +187,16 @@ impl BTree{
         Ok(Self { file, wal, cache, dirty_pages, num_nodes})   
     }
 
-    //Encodes key into a number to handle different input types. 
+    /// Encodes the input key into a number to handle different input types. This way we can mantain integer values for
+    /// all keys and keep the ability to perform quick range queries regardless of the user entegers an integer or some 
+    /// other form of data for the key. 
     fn encode_key(&self, key: &str){
 
     }
 
+    /// Searches the B-Tree for the page based on the node id passed by the user. First checks cache and dirty pages buffer
+    /// for most recently accessed pages to avoid performing additional I/O operations. If not found, the system will search
+    /// on the disk and newly accessed pages from the disk get moved into the cache. 
     fn get(&mut self, key: u32) -> &BTreeNode {
         if self.cache.contains_key(key){
             return self.cache.get(key);
@@ -193,6 +209,7 @@ impl BTree{
         }
     }
 
+    /// Same as the get() method but returns a mutable reference to the page/node for write() method. 
     fn get_mut(&mut self, key: u32) -> &mut BTreeNode {
         if self.cache.contains_key(key){
             return self.cache.get_mut(key).unwrap();
@@ -205,11 +222,17 @@ impl BTree{
         }
     }
 
+    //Remove
     fn get_object(&mut self, key: u32) -> BTreeNode {
-        return self.cache.map.remove(&key).unwrap();
+        if self.cache.contains_key(key) {
+            return self.cache.map.remove(&key).unwrap();
+        } else {
+            return self.dirty_pages.remove(&key).unwrap();
+        }
     }
 
 
+    /// Loads and deserializes node from the disk into memory from the starting position specified. 
     fn read_node_from_file(&mut self, offset: usize) -> Option<BTreeNode> {
         let mut buf = [0u8; 4096]; //
         self.file.seek(io::SeekFrom::Start(offset.try_into().unwrap())); 
@@ -218,11 +241,19 @@ impl BTree{
         Some(node)
     }    
 
+    /// Appends write request information to the write-ahead log (WAL). Because appending to a file is 
+    /// much quicker than overriding a portion of an existing file, the WAL acts as a countermeasure in case 
+    /// the system crashes before it can flush any changes to the disk. Upon re-starting, if there 
+    /// are any writes still within the WAL, those requests will be re-executed. 
     fn write_to_wal(&mut self, key: u16, val:u16){
         self.wal.write_all(&key.to_le_bytes()).unwrap();
         self.wal.write_all(&val.to_le_bytes()).unwrap();
+
+        println!("Wrote key and val {} {} to WAL", key, val);
     }   
 
+    /// Deserializes the sequence of bytes retreived from the disk into BTreeNode so that the 
+    /// data is usable by the application. 
     fn deserialize(&self, buf: &[u8; 4096]) -> BTreeNode {
         let id = u32::from_le_bytes(buf[0..4].try_into().unwrap());
         let leaf = buf[4];
@@ -260,6 +291,9 @@ impl BTree{
         node
     }       
 
+    /// Writes the key-value pair to the WAL and the appropriate B-Tree Node and stores those changes in the dirty pages buffer. 
+    /// If the node becomes full, the tree will call the rebalance () function to split the node into two and update the parent 
+    /// node. 
     pub fn write(&mut self, key: u16, val: u16) {
         self.write_to_wal(key, val);
 
@@ -302,12 +336,64 @@ impl BTree{
         //old_root.write_node_to_file(file);
     }
 
-    fn flush(&mut self){
+    /// Flushes all the modified nodes to the disk then clears the WAL and dirty pages buffer. 
+    pub fn flush(&mut self){
         for node in self.dirty_pages.values_mut() {
             node.write_node_to_file(&mut self.file);
         }
+
+        self.reset_wal();
+        self.dirty_pages.clear();
+        println!("Successfully flushed changes to disk");
     }
 
+    /// Reset WAL is called upon flushing all changed nodes to the disk. Because the changes have been persisted,
+    /// there is no longer a need to keep track of the writes we have made. 
+    fn reset_wal(&mut self) {
+        self.wal.set_len(0);
+        self.wal.rewind();
+    }
+
+    fn read_from_wal(&mut self, offset: u64) -> (u16, u16) {
+        let mut buf = [0u8; 4]; //
+        self.wal.seek(io::SeekFrom::Start(offset)); 
+        self.wal.read_exact(&mut buf);
+        let key = u16::from_le_bytes(buf[0..2].try_into().unwrap());
+        let val = u16::from_le_bytes(buf[2..4].try_into().unwrap());
+
+        println!("Recovered operation write {} {}", key, val);
+        (key, val)
+    }
+
+    /// Recover is called upon startup. Checks the WAL in case the database had crashed previously. 
+    /// If WAL is not empty, then recovers the lost changes by executing all operations written to the WAL. 
+    pub fn recover(&mut self) {
+        let mut wal_len = self.wal.metadata().unwrap().len() ;
+        println!("Length of WAL is {}", wal_len);
+        
+        if wal_len == 0 {
+            return 
+        } else {
+            let mut offset = 0;
+
+            loop {
+
+                if offset + 4 > wal_len {
+                    break;
+                }
+
+                let (key, val) = self.read_from_wal(offset);
+                self.write(key, val);
+                offset = offset + 4;
+            }
+
+            self.reset_wal();
+        }
+    }
+
+    /// Called when any node reaches 4096 bytes. The full node gets split into two and the parent node is updated to include
+    /// a reference to the new child node created and the key value where it begins. If the parent is full as well, this process
+    /// is repeated until all nodes within the tree are below 4096 bytes. 
     fn rebalance (&mut self, mut stack: Vec<u32>) {
         let mut split_nodes: Option<Vec<u32>> = None;
         let mut insert_key:Option<u16> = None;
@@ -335,17 +421,6 @@ impl BTree{
             let unwrapped_current_node = current_node.unwrap();
 
             if !split_nodes.is_none() {
-                //Node reached capacity and was split so the the range of keys in the parent 
-                //needs to update with an additional key. 
-
-                //Find the index of the old node and insert newNode id at index+1
-                //insert new key at 
-
-                //old child node has key ranging from i to k before split. 
-                //now it's i to j and j+1 to k for each child. 
-
-                //in current node locate where i is in keys. insert j+1 at index+1. 
-                //in children, insert new child at index+2. 
                 let index = unwrapped_current_node.search(insert_key.unwrap());
                 unwrapped_current_node.keys.insert(index, insert_key.unwrap());
                 unwrapped_current_node.children.insert(index+1, split_nodes.unwrap()[1]);
@@ -389,6 +464,7 @@ impl BTree{
         }
     }
 
+    /// Searches the B-Tree for the specified key and returns the value found. 
     pub fn read(&mut self, key: u16) -> Option<u16> {
         let mut offset: u32 = 0;
 
