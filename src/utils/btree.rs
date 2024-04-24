@@ -1,4 +1,4 @@
-const BRANCHING_FACTOR: u16 = 500;
+const BRANCHING_FACTOR: u16 = 5;
 const LEVELS: usize = 3;
 const MAX_PAGE_BYTES: usize = 4096;
 
@@ -12,7 +12,7 @@ use std::convert::TryInto;
 use self::linked_hash_map::LinkedHashMap;
 
 /// An in-memory cache to hold the most recently accessed pages. 
-/// and reduce the number of I/O operations. Uses Least Recently Used 
+/// and reduce the number of I/O operations. Uses Least Recently Used (LRU)
 /// method to evict old pages if the cache is full. 
 pub struct LRUCache {
     map: LinkedHashMap<u32, BTreeNode>
@@ -226,8 +226,11 @@ impl BTree{
     fn get_object(&mut self, key: u32) -> BTreeNode {
         if self.cache.contains_key(key) {
             return self.cache.map.remove(&key).unwrap();
-        } else {
+        } else if self.dirty_pages.contains_key(&key) {
             return self.dirty_pages.remove(&key).unwrap();
+        } else {
+            let node = self.read_node_from_file(key.try_into().unwrap()).unwrap();
+            return node;           
         }
     }
 
@@ -318,10 +321,11 @@ impl BTree{
                     removed_node.num_keys += 1;
                 }
 
-                if removed_node.num_keys == BRANCHING_FACTOR {
+                let num_keys = removed_node.num_keys;
+                self.dirty_pages.insert(offset, removed_node);
+
+                if num_keys == BRANCHING_FACTOR {
                     self.rebalance(stack);
-                } else {
-                    self.dirty_pages.insert(offset, removed_node);
                 }
 
                 break;
@@ -329,11 +333,6 @@ impl BTree{
                 offset = cur_node.children[index];
             }
         }
-    }
-
-    fn swap(&mut self, new_root : BTreeNode){
-        //let old_root = self.get(0);
-        //old_root.write_node_to_file(file);
     }
 
     /// Flushes all the modified nodes to the disk then clears the WAL and dirty pages buffer. 
@@ -368,6 +367,8 @@ impl BTree{
     /// Recover is called upon startup. Checks the WAL in case the database had crashed previously. 
     /// If WAL is not empty, then recovers the lost changes by executing all operations written to the WAL. 
     pub fn recover(&mut self) {
+        self.print_root();
+
         let mut wal_len = self.wal.metadata().unwrap().len() ;
         println!("Length of WAL is {}", wal_len);
         
@@ -391,6 +392,23 @@ impl BTree{
         }
     }
 
+    pub fn print_root(&mut self) -> () {
+        let root = self.get(0);
+        println!("root id : {}", root.id);
+        println!("root leaf : {}", root.leaf);
+        println!("root num_keys : {}", root.num_keys);
+
+        for key in &root.keys {
+            println!("root keys : {}", key);
+        }
+        for child in &root.children {
+            println!("root child node id : {}", child);
+        }
+        for val in &root.vals {
+            println!("root val : {}", val);
+        }
+    }
+
     /// Called when any node reaches 4096 bytes. The full node gets split into two and the parent node is updated to include
     /// a reference to the new child node created and the key value where it begins. If the parent is full as well, this process
     /// is repeated until all nodes within the tree are below 4096 bytes. 
@@ -398,38 +416,45 @@ impl BTree{
         let mut split_nodes: Option<Vec<u32>> = None;
         let mut insert_key:Option<u16> = None;
 
-        loop {
-            let offset = stack.pop().unwrap();
+        loop { 
+        
+            let remaining_nodes = stack.len();
 
-            let current_node = self.cache.get_mut(offset);
-
-            if current_node.is_none() && split_nodes.is_none() {
+            if remaining_nodes == 0 && split_nodes.is_none() {
                 break;
-            } else if current_node.is_none() && !split_nodes.is_none() {
+            } else if remaining_nodes == 0 && !split_nodes.is_none() {
                 //Root node reached capacity so it got split into two and a new root node needs to be created. 
                 let unwrapped_split_nodes = split_nodes.unwrap();
                 let mut new_root = BTreeNode::new();
-
+                new_root.leaf = 0;
+                new_root.num_keys = 1;
                 new_root.keys.push(insert_key.unwrap());
-
                 new_root.children.push(unwrapped_split_nodes[0]);
                 new_root.children.push(unwrapped_split_nodes[1]);
-                self.swap(new_root);
+
+                //swap ids so that new_root is at start of file. 
+                new_root.id = 0;
+                self.dirty_pages.insert(0, new_root);
                 break;
             } 
 
-            let unwrapped_current_node = current_node.unwrap();
+            //Unwrap the next node on the stack
+            let offset = stack.pop().unwrap();
+            let mut unwrapped_current_node = self.get_object(offset);
+
+            //Check if the child node was split into two. If so, then the current (parent) node needs to add a new 
+            //key at the point of split. 
 
             if !split_nodes.is_none() {
                 let index = unwrapped_current_node.search(insert_key.unwrap());
                 unwrapped_current_node.keys.insert(index, insert_key.unwrap());
                 unwrapped_current_node.children.insert(index+1, split_nodes.unwrap()[1]);
                 unwrapped_current_node.num_keys +=1 ;
-                unwrapped_current_node.write_node_to_file(&mut self.file);
+                //self.dirty_pages.insert(unwrapped_current_node.id, unwrapped_current_node);
             }
 
+            //Check if the current node has reached capacity. 
             if unwrapped_current_node.num_keys == BRANCHING_FACTOR {
-                //Current node reached capacity and needs to be split. 
                 let new_node_id :u32 = self.num_nodes.try_into().unwrap();
                 let new_node_leaf = unwrapped_current_node.leaf;
                 let new_node_keys = unwrapped_current_node.keys.split_off((BRANCHING_FACTOR/2).into());
@@ -438,7 +463,7 @@ impl BTree{
                     false => unwrapped_current_node.children.split_off((BRANCHING_FACTOR/2).into()),
                 };
 
-                let new_node_vals = match new_node_leaf == 1 {
+                let new_node_vals = match new_node_leaf == 0 {
                     true => Vec::new(),
                     false => unwrapped_current_node.vals.split_off((BRANCHING_FACTOR/2).into()),
                 };
@@ -449,17 +474,20 @@ impl BTree{
                     new_node_keys, 
                     new_node_chilren, 
                     new_node_vals);
-
                 self.num_nodes +=1;
-                unwrapped_current_node.write_node_to_file(&mut self.file);
-                new_node.write_node_to_file(&mut self.file);
 
-                split_nodes = Some(vec![unwrapped_current_node.id, new_node.id]);
-                insert_key = Some(unwrapped_current_node.keys[0]);
+                if unwrapped_current_node.id == 0 {
+                    unwrapped_current_node.id = self.num_nodes.try_into().unwrap();
+                    self.num_nodes +=1;
+                }
 
+                split_nodes = Some(vec![unwrapped_current_node.id, new_node_id]);
+                insert_key = Some(new_node.keys[0]-1);
+
+                self.dirty_pages.insert(unwrapped_current_node.id, unwrapped_current_node);
+                self.dirty_pages.insert(new_node_id, new_node);
             } else {
-                split_nodes = None;
-                insert_key = None;
+               break;
             }
         }
     }

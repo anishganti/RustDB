@@ -15,15 +15,15 @@ fn main() {
     let file_path = "/Users/anishganti/RustDB/src/test.bin";
     let wal_path = "/Users/anishganti/RustDB/src/test_wal.bin";
 
-    /*match create_binary_file(file_path) {
+    match create_binary_file(file_path, 4096) {
         Ok(_) => println!("New database '{}' created successfully.", file_path),
         Err(err) => eprintln!("Error creating database file: {}", err),
     }
 
-    match create_binary_file(wal_path) {
+    match create_binary_file(wal_path, 0) {
         Ok(_) => println!("New write ahead log (WAL) '{}' created successfully.", file_path),
         Err(err) => eprintln!("Error creating WAL file: {}", err),
-    }*/
+    }
 
     // Load the database by opening the file and WAL from disk. 
     let mut database = match BTree::new(file_path,  wal_path) {
@@ -62,7 +62,9 @@ fn main() {
             result = database.read(key);
         } else if op == "write" {
             database.write(key, value);
-        } 
+        } else if op == "print" {
+            database.print_root();
+        }
 
         match result {
             Some(value) => println!("Result: {}", value),
@@ -73,18 +75,18 @@ fn main() {
     println!("See you later!");
 }
 
-fn create_binary_file(file_path: &str) -> io::Result<()> {
+fn create_binary_file(file_path: &str, length : usize) -> io::Result<()> {
     // Create a new file at the specified file_path
     let mut file = File::create(file_path)?;
 
     // Define the content of the binary file (4096 bytes)
-    let mut bytes = vec![0u8; 4096];  // Create a vector initialized with 4096 zeros
+    let mut bytes = vec![0u8; length];  // Create a vector initialized with 4096 zeros
 
-    // Set the 9th byte (index 8) to 1
-    if bytes.len() > 4 {
+    // Set the 5th byte (index 4) to 1 since the root should be initialized as the leaf
+    if bytes.len() > 4 && length == 4096  {
         bytes[4] = 1;
     } else {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Insufficient bytes in buffer"));
+        //return Err(io::Error::new(io::ErrorKind::InvalidInput, "Insufficient bytes in buffer"));
     }
 
     // Write the bytes to the file
