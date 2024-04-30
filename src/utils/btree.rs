@@ -313,7 +313,9 @@ impl BTree{
                 //No longer just borrowing the object, we need owernship as the obejct moves from cache to buffer. 
                 let mut removed_node = self.get_object(offset);
                 let numk : usize = removed_node.num_keys.into();
+                
                 if numk > index && removed_node.keys[index] == key {
+                    //Update the key if it already exists. Check that index is valid before trying to acess it. 
                     removed_node.vals[index] = val;
                 } else {
                     removed_node.keys.insert(index.try_into().unwrap(), key);
@@ -435,26 +437,30 @@ impl BTree{
                 //swap ids so that new_root is at start of file. 
                 new_root.id = 0;
                 self.dirty_pages.insert(0, new_root);
+                
                 break;
             } 
 
             //Unwrap the next node on the stack
             let offset = stack.pop().unwrap();
             let mut unwrapped_current_node = self.get_object(offset);
+            let mut current_node_id = unwrapped_current_node.id;
 
             //Check if the child node was split into two. If so, then the current (parent) node needs to add a new 
             //key at the point of split. 
+            let mut modified = false;
 
             if !split_nodes.is_none() {
                 let index = unwrapped_current_node.search(insert_key.unwrap());
                 unwrapped_current_node.keys.insert(index, insert_key.unwrap());
                 unwrapped_current_node.children.insert(index+1, split_nodes.unwrap()[1]);
                 unwrapped_current_node.num_keys +=1 ;
-                //self.dirty_pages.insert(unwrapped_current_node.id, unwrapped_current_node);
+                modified = true;
             }
 
             //Check if the current node has reached capacity. 
             if unwrapped_current_node.num_keys == BRANCHING_FACTOR {
+                unwrapped_current_node.num_keys = 2;
                 let new_node_id :u32 = self.num_nodes.try_into().unwrap();
                 let new_node_leaf = unwrapped_current_node.leaf;
                 let new_node_keys = unwrapped_current_node.keys.split_off((BRANCHING_FACTOR/2).into());
@@ -470,23 +476,29 @@ impl BTree{
                 
                 let new_node = BTreeNode::new_from_params(new_node_id, 
                     new_node_leaf, 
-                    BRANCHING_FACTOR/2,
+                    3,
                     new_node_keys, 
                     new_node_chilren, 
                     new_node_vals);
                 self.num_nodes +=1;
 
-                if unwrapped_current_node.id == 0 {
+                if current_node_id == 0 {
                     unwrapped_current_node.id = self.num_nodes.try_into().unwrap();
+                    current_node_id = self.num_nodes.try_into().unwrap();
                     self.num_nodes +=1;
                 }
 
-                split_nodes = Some(vec![unwrapped_current_node.id, new_node_id]);
+                split_nodes = Some(vec![current_node_id, new_node_id]);
                 insert_key = Some(new_node.keys[0]-1);
 
-                self.dirty_pages.insert(unwrapped_current_node.id, unwrapped_current_node);
+                self.dirty_pages.insert(current_node_id, unwrapped_current_node);
                 self.dirty_pages.insert(new_node_id, new_node);
             } else {
+
+                if modified {
+                    self.dirty_pages.insert(current_node_id, unwrapped_current_node); 
+                }
+
                break;
             }
         }
