@@ -1,5 +1,5 @@
-mod utils;
-use utils::btree::BTree;
+mod btree;
+use btree::tree::BTree;
 use std::fs::File;
 use std::io::{self, Write};
 
@@ -7,8 +7,8 @@ use std::io::{self, Write};
 //  imposing key order for different key types 
 //  test split pages
 //  removing nodes
-// replicas
-// partitions 
+//  replicas
+//  partitions 
 
 
 fn main() {
@@ -62,8 +62,6 @@ fn main() {
             result = database.read(key);
         } else if op == "write" {
             database.write(key, value);
-        } else if op == "print" {
-            database.print_root();
         }
 
         match result {
