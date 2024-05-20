@@ -62,6 +62,8 @@ fn main() {
             result = database.read(key);
         } else if op == "write" {
             database.write(key, value);
+        } else if op == "delete" {
+            database.delete(key);
         }
 
         match result {

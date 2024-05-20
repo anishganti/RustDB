@@ -104,4 +104,15 @@ impl BTreeNode {
 
         self.keys.len()
     }
+
+    pub fn is_leaf(&self) -> bool {
+        let mut is_leaf = false; 
+
+        if self.leaf == 1 {
+            is_leaf = true;
+        }
+        
+        is_leaf
+    }
+    
 }

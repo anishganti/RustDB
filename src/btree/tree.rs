@@ -1,6 +1,8 @@
 const BRANCHING_FACTOR: u16 = 5;
 const LEVELS: usize = 3;
-const MAX_PAGE_BYTES: usize = 4096;
+const MAX_PAGE_BYTES: u16 = 4096;
+const MIN_PAGE_BYTES: u16 = 4096;
+
 
 extern crate linked_hash_map;
 
@@ -53,6 +55,35 @@ impl BTree{
     /// other form of data for the key. 
     fn encode_key(&self, key: &str){
 
+    }
+
+    fn is_leaf(&mut self, node_id: u32) -> bool {
+        let node = self.get(node_id);
+        let is_leaf = node.is_leaf();
+
+        is_leaf
+    }
+
+    fn get_num_keys(&mut self, node_id: u32) -> u16 {
+        let node = self.get(node_id);
+        let num_keys = node.num_keys;
+
+        num_keys
+    }
+
+
+    fn child_has_siblings(&mut self, parent_id: u32) -> bool {
+        let parent = self.get(parent_id);
+        let has_siblings = parent.children.len() > 1;
+
+        has_siblings
+    }
+
+    fn get_child_id(&mut self, parent_id: u32, index : usize) -> u32 {
+        let parent = self.get(parent_id);
+        let child_id = parent.children[index];
+
+        child_id
     }
 
     /// Searches the B-Tree for the page based on the node id passed by the user. First checks cache and dirty pages buffer
@@ -188,7 +219,7 @@ impl BTree{
                 self.dirty_pages.insert(offset, removed_node);
 
                 if num_keys == BRANCHING_FACTOR {
-                    self.rebalance(stack);
+                    self.handle_overflow(stack);
                 }
 
                 break;
@@ -230,7 +261,7 @@ impl BTree{
     /// Recover is called upon startup. Checks the WAL in case the database had crashed previously. 
     /// If WAL is not empty, then recovers the lost changes by executing all operations written to the WAL. 
     pub fn recover(&mut self) {
-        let mut wal_len = self.wal.metadata().unwrap().len() ;
+        let wal_len = self.wal.metadata().unwrap().len() ;
         println!("Length of WAL is {}", wal_len);
         
         if wal_len == 0 {
@@ -253,13 +284,13 @@ impl BTree{
         }
     }
 
-    /// Rebalances the b-tree when any node reaches 4096 bytes. 
+    /// Rebalances the B-tree when any node reaches 4096 bytes. 
     /// 
     /// The full node gets split into two and the parent node is updated to include
     /// a reference to the new child node created and the key value where it begins. 
     /// 
     /// If the parent is also full, this process is repeated until all nodes are less than 4096 bytes. 
-    fn rebalance (&mut self, mut stack: Vec<u32>) {
+    fn handle_overflow (&mut self, mut stack: Vec<u32>) {
         let mut split_nodes: Option<Vec<u32>> = None;
         let mut insert_key:Option<u16> = None;
 
@@ -279,7 +310,10 @@ impl BTree{
 
             //Check if the current node has reached capacity. 
             if cur_node.num_keys == BRANCHING_FACTOR {
-                let (split_nodes_cpy, insert_key_cpy, new_node) = self.split(&mut cur_node);
+                let (split_nodes_cpy, 
+                    insert_key_cpy, 
+                    new_node) = self.split(&mut cur_node);
+
                 split_nodes = split_nodes_cpy;
                 insert_key = insert_key_cpy;
 
@@ -382,7 +416,190 @@ impl BTree{
                 offset = cur_node.children[index];
             }
         }
-    }   
+    }
+
+    /// Searches the B-Tree for the specified key and removes the key-value pair if found. 
+    pub fn delete(&mut self, key: u16) ->  () {
+        //Look to locate the deleted key in the leaf nodes.
+        // Delete the key and its associated value if the key is discovered in a leaf node.
+        // One of the following steps should be taken if the node underflows (number of keys is less than half the maximum allowed):
+        //     Get a key by borrowing it from a sibling node if it contains more keys than the required minimum.
+        //     If the minimal number of keys is met by all of the sibling nodes, merge the underflow node with one of its siblings and modify the parent node as necessary.
+        // Remove all references to the deleted leaf node from the internal nodes of the tree.
+        // Remove the old root node and update the new one if the root node is empty.
+
+        //The root will always be at the start of the file so the offset is 0. 
+        let mut offset: u32 = 0;
+        let mut stack = vec![];
+
+        loop {
+            let cur_node = self.get_mut(offset);
+
+            let index: usize = cur_node.search(key);
+
+            stack.push((offset, index));
+
+            if cur_node.leaf == 1{
+                if cur_node.keys[index] == key {
+                    cur_node.keys.remove(index);
+                    cur_node.vals.remove(index);
+                    cur_node.num_keys -= 1;
+
+                    if cur_node.num_keys < MIN_PAGE_BYTES {
+                        self.handle_underflow(stack);
+                        break;
+                    }
+                }   
+            } else {
+                offset = cur_node.children[index];
+            }
+        }
+
+    }
+
+    fn check_underflow(&mut self, node_id: u32) -> bool {
+        let mut underflow = false;
+
+        let node = self.get(node_id);
+
+        if node.num_keys < MIN_PAGE_BYTES {
+            underflow = true;
+        }
+
+        underflow
+    }
+
+    fn handle_underflow (&mut self, mut stack: Vec<(u32, usize)>) -> () {
+        //Starting from the deepest node. The algorithm will look something like this: 
+        //if the current node has an underflow, go to the parent node. From the parent node
+        // check if any of the child's adjacent nodes has more nodes/keys than minimum. If so, 
+        // then move exactly one key . Remove the extra key
+        // from the parent's list and also remove the node count. The physical node removed also should be
+        // swapped from the lsat node on the disk in order to avoid fragmentation. If the parent is now underflowing, 
+        // repeat the process. If the root is underflowing, that is ok, so we can break if stack is empty after popping. 
+
+        let mut underflow = true;
+
+        loop { 
+        
+            let (parent_offset, index)  = stack.pop().unwrap();
+            let parent_is_leaf = self.is_leaf(parent_offset);
+
+            if stack.is_empty() || underflow == false {
+                break;        
+            } else if parent_is_leaf {
+                continue;
+            } 
+
+            let has_siblings = self.child_has_siblings(parent_offset);
+            let child_idx: u32 = self.get_child_id(parent_offset, index);
+            let child = self.get_object(child_idx);
+
+            if has_siblings {
+                let (sibling, has_extra_keys, dir) = self.select_sibling(parent_offset, index);
+
+                if has_extra_keys == false {
+                    self.merge(sibling, child);
+                } else {
+                    self.shift(sibling, child, dir);
+                }
+            } else {
+                let parent = self.get_object(parent_offset);
+                self.merge(parent, child);
+            }
+
+            underflow = self.check_underflow(parent_offset);
+        }
+            
+    }
+    /// Returns the sibling node with most extra-keys to remove keys from. If no sibling has extra keys
+    /// to give up to the child node, then a sibling node to merge child node into. 
+    fn select_sibling(&mut self, parent_id : u32, index : usize) -> (BTreeNode, bool, char) {
+        let parent_num_keys = self.get_num_keys(parent_id);
+        let mut has_extra_keys = true;
+        let mut sibling_id = None;
+        let mut dir = 'r'; 
+
+        if index == 0 {
+            let right_sibling_id = self.get_child_id(parent_id, index+1);
+            let right_sibling_num_keys = self.get_num_keys(right_sibling_id);
+            has_extra_keys = right_sibling_num_keys > MAX_PAGE_BYTES;
+            sibling_id = Some(right_sibling_id)
+        } else if index == (parent_num_keys - 1).into() {
+            let left_sibling_id = self.get_child_id(parent_id, index+1);
+            let left_sibling_num_keys = self.get_num_keys(left_sibling_id);
+            has_extra_keys = left_sibling_num_keys > MAX_PAGE_BYTES;
+            sibling_id = Some(left_sibling_id);
+            dir = 'l';
+        } else {
+            let right_sibling_id = self.get_child_id(parent_id, index+1);
+            let right_sibling_num_keys = self.get_num_keys(right_sibling_id);
+            let left_sibling_id = self.get_child_id(parent_id, index+1);
+            let left_sibling_num_keys = self.get_num_keys(left_sibling_id);
+
+            if left_sibling_num_keys > right_sibling_num_keys {
+                sibling_id = Some(left_sibling_id);
+                has_extra_keys = left_sibling_num_keys > MAX_PAGE_BYTES;
+                dir = 'l';
+            } else {
+                sibling_id = Some(right_sibling_id);
+                has_extra_keys = right_sibling_num_keys > MAX_PAGE_BYTES;
+            }
+
+
+        }
+        let sibling = self.get_object(sibling_id.unwrap());
+        (sibling, has_extra_keys, dir)
+    }
+
+    /// Merge node since it has less keys than the MIN value and cannot borrow from sibling. 
+    ///
+    /// It can either merge with a sibling node, or if none exist, the parent node. 
+    /// This will convert the parent node into a leaf node. 
+    fn merge(&mut self, mut sibling : BTreeNode, mut child: BTreeNode){
+
+    }
+
+    /// Shift value or child node from sibling to child. Parent needs to be updated to 
+    /// reflect in change in key-range. 
+    fn shift(&mut self, mut sibling : BTreeNode, mut child: BTreeNode, dir : char){
+        
+        let (key_to_shift, insert_key) = match dir {
+            'l' => (sibling.keys.pop().unwrap(), 0),
+            'r' => (sibling.keys.remove(0), child.num_keys),
+            _ => (sibling.keys.pop().unwrap(), 0),
+        };
+
+        let insert_key : usize = insert_key.into();
+
+        sibling.num_keys = sibling.num_keys - 1;
+        child.num_keys = child.num_keys + 1; 
+        child.keys.insert(insert_key, key_to_shift);
+
+        if sibling.is_leaf() {
+            let val_to_shift = match dir {
+                'l' => sibling.vals.pop().unwrap(),
+                'r' => sibling.vals.remove(0),
+                _ => sibling.vals.pop().unwrap(),
+            };
+
+            child.vals.insert(insert_key, val_to_shift);
+            
+        } else {
+            let node_to_shift = match dir {
+                'l' => sibling.children.pop().unwrap(),
+                'r' => sibling.children.remove(0),
+                _ => sibling.children.pop().unwrap(),
+            };
+
+            child.children.insert(insert_key, node_to_shift);
+        }
+
+        self.dirty_pages.insert(sibling.id, sibling);
+        self.dirty_pages.insert(child.id,  child);
+    }
+
+
 }
 
 #[cfg(test)]
