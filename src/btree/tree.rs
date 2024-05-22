@@ -7,11 +7,12 @@ const MIN_PAGE_BYTES: u16 = 4096;
 extern crate linked_hash_map;
 
 use btree::cache::LRUCache;
-use btree::node::BTreeNode;
+use btree::node::{NodeInfo, BTreeNode};
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::hash::Hash;
 use std::io::{self, Read, Write, Seek};
 use std::convert::TryInto;
 
@@ -57,35 +58,6 @@ impl BTree{
 
     }
 
-    fn is_leaf(&mut self, node_id: u32) -> bool {
-        let node = self.get(node_id);
-        let is_leaf = node.is_leaf();
-
-        is_leaf
-    }
-
-    fn get_num_keys(&mut self, node_id: u32) -> u16 {
-        let node = self.get(node_id);
-        let num_keys = node.num_keys;
-
-        num_keys
-    }
-
-
-    fn child_has_siblings(&mut self, parent_id: u32) -> bool {
-        let parent = self.get(parent_id);
-        let has_siblings = parent.children.len() > 1;
-
-        has_siblings
-    }
-
-    fn get_child_id(&mut self, parent_id: u32, index : usize) -> u32 {
-        let parent = self.get(parent_id);
-        let child_id = parent.children[index];
-
-        child_id
-    }
-
     /// Searches the B-Tree for the page based on the node id passed by the user. First checks cache and dirty pages buffer
     /// for most recently accessed pages to avoid performing additional I/O operations. If not found, the system will search
     /// on the disk and newly accessed pages from the disk get moved into the cache. 
@@ -126,6 +98,26 @@ impl BTree{
         }
     }
 
+    /// Returns a map containing information about a node depending on requested fields. 
+    /// 
+    /// This method is preferable to calling .get() since the latter returns a reference, meaning that the entire BTree 
+    /// class was locked until the node reference was released. This class will return information about a node to the user
+    /// and release the node reference so other class methods can be called. Additionally, by passing in a parameter of fields
+    /// needed from the start, the user can avoid having to re-search every time an additional field is needed. 
+    fn get_node_info(&mut self, node_id: u32, fields: Vec<&str>, index: Option<usize>) -> HashMap<String, NodeInfo> {
+        let node = self.get(node_id);
+        let mut node_info = HashMap::<String, NodeInfo>::new();
+ 
+        for field in fields {
+            if let Some(field_value) = node.get_field_info(field, index.unwrap()) {
+                node_info.insert(field.to_string(), field_value);
+            } else {
+                println!("Invalid field: {}", field);
+            }        
+        }
+
+        node_info
+    }
 
     /// Loads and deserializes node from the disk into memory from the starting position specified. 
     fn read_node_from_file(&mut self, offset: usize) -> Option<BTreeNode> {
@@ -482,8 +474,9 @@ impl BTree{
 
         loop { 
         
-            let (parent_offset, index)  = stack.pop().unwrap();
-            let parent_is_leaf = self.is_leaf(parent_offset);
+            let (parent_id, index)  = stack.pop().unwrap();
+            let parent_info = self.get_node_info(parent_id, vec!["str"], Some(index));
+            let parent_is_leaf = parent_info.get("is_leaf").expect("Boolean").as_bool();
 
             if stack.is_empty() || underflow == false {
                 break;        
@@ -491,51 +484,56 @@ impl BTree{
                 continue;
             } 
 
-            let has_siblings = self.child_has_siblings(parent_offset);
-            let child_idx: u32 = self.get_child_id(parent_offset, index);
-            let child = self.get_object(child_idx);
+            let has_siblings = parent_info.get("has_siblings").expect("msg").as_bool();
+            let child_id = parent_info.get("child_id").expect("msg").as_u32();
+            let child = self.get_object(child_id);
 
             if has_siblings {
-                let (sibling, has_extra_keys, dir) = self.select_sibling(parent_offset, index);
+                let (sibling, has_extra_keys, dir) = self.select_sibling(&parent_info);
 
                 if has_extra_keys == false {
                     self.merge(sibling, child);
                 } else {
                     self.shift(sibling, child, dir);
                 }
+
             } else {
-                let parent = self.get_object(parent_offset);
+                let parent = self.get_object(parent_id);
                 self.merge(parent, child);
             }
 
-            underflow = self.check_underflow(parent_offset);
+            underflow = self.check_underflow(parent_id);
         }
             
     }
     /// Returns the sibling node with most extra-keys to remove keys from. If no sibling has extra keys
     /// to give up to the child node, then a sibling node to merge child node into. 
-    fn select_sibling(&mut self, parent_id : u32, index : usize) -> (BTreeNode, bool, char) {
-        let parent_num_keys = self.get_num_keys(parent_id);
+    fn select_sibling(&mut self, parent_info : &HashMap<String, NodeInfo>) -> (BTreeNode, bool, char) {
         let mut has_extra_keys = true;
         let mut sibling_id = None;
         let mut dir = 'r'; 
 
-        if index == 0 {
-            let right_sibling_id = self.get_child_id(parent_id, index+1);
-            let right_sibling_num_keys = self.get_num_keys(right_sibling_id);
+        if parent_info.contains_key("right_child") && !parent_info.contains_key("left_child") {
+            let right_sibling_id = parent_info.get("right_child_id").expect("msg").as_u32();
+            let right_sibling_info = self.get_node_info(right_sibling_id, vec!["num_keys"], None);
+            let right_sibling_num_keys = right_sibling_info.get("num_keys").expect("msg").as_u16();
             has_extra_keys = right_sibling_num_keys > MAX_PAGE_BYTES;
-            sibling_id = Some(right_sibling_id)
-        } else if index == (parent_num_keys - 1).into() {
-            let left_sibling_id = self.get_child_id(parent_id, index+1);
-            let left_sibling_num_keys = self.get_num_keys(left_sibling_id);
+            sibling_id = Some(right_sibling_id);
+        } else if !parent_info.contains_key("right_child") && parent_info.contains_key("left_child")  {
+            let left_sibling_id = parent_info.get("left_child_id").expect("msg").as_u32();
+            let left_sibling_info = self.get_node_info(left_sibling_id, vec!["num_keys"], None);
+            let left_sibling_num_keys = left_sibling_info.get("num_keys").expect("msg").as_u16();
             has_extra_keys = left_sibling_num_keys > MAX_PAGE_BYTES;
             sibling_id = Some(left_sibling_id);
             dir = 'l';
         } else {
-            let right_sibling_id = self.get_child_id(parent_id, index+1);
-            let right_sibling_num_keys = self.get_num_keys(right_sibling_id);
-            let left_sibling_id = self.get_child_id(parent_id, index+1);
-            let left_sibling_num_keys = self.get_num_keys(left_sibling_id);
+            let right_sibling_id = parent_info.get("right_child_id").expect("msg").as_u32();
+            let right_sibling_info = self.get_node_info(right_sibling_id, vec!["num_keys"], None);
+            let right_sibling_num_keys = right_sibling_info.get("num_keys").expect("msg").as_u16();
+
+            let left_sibling_id = parent_info.get("left_child_id").expect("msg").as_u32();
+            let left_sibling_info = self.get_node_info(left_sibling_id, vec!["num_keys"], None);
+            let left_sibling_num_keys = left_sibling_info.get("num_keys").expect("msg").as_u16();
 
             if left_sibling_num_keys > right_sibling_num_keys {
                 sibling_id = Some(left_sibling_id);

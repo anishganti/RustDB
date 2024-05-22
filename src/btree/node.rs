@@ -13,6 +13,39 @@ pub struct BTreeNode {
     pub vals: Vec<u16>, 
 }
 
+/// Enum to list different value-types a field in Node can contain. Used in BTree's get_node_info() method. 
+pub enum NodeInfo {
+    U16(u16),
+    U32(u32),
+    Bool(bool),
+}
+
+impl NodeInfo {
+    pub fn as_u32(&self) -> u32 {
+        if let NodeInfo::U32(val) = *self {
+            val
+        } else {
+            panic!("Expected a u32 value")
+        }
+    }
+
+    pub fn as_u16(&self) -> u16 {
+        if let NodeInfo::U16(val) = *self {
+            val
+        } else {
+            panic!("Expected a u16 value")
+        }
+    }
+
+    pub fn as_bool(&self) -> bool {
+        if let NodeInfo::Bool(bool) = *self {
+            bool
+        } else {
+            panic!("Expected a boolean value")
+        }
+    }
+}
+
 impl BTreeNode {
     /// Create a new leaf page (node) with empty lists. 
     pub fn new() -> Self {
@@ -38,6 +71,21 @@ impl BTreeNode {
             vals, 
         }
     }
+
+    ///         
+    pub fn get_field_info(&self, field: &str, index: usize) -> Option<NodeInfo> {
+        match field {
+            "is_leaf"        => Some(NodeInfo::Bool(self.is_leaf())),
+            "has_siblings"   => Some(NodeInfo::Bool(self.children.len() > 1)),
+            "num_keys"       => Some(NodeInfo::U16(self.num_keys)),
+            "node_id"        => Some(NodeInfo::U32(self.id)),
+            "child_id"       => Some(NodeInfo::U32(self.children[index])),
+            "left_child_id"  => Some(NodeInfo::U32(self.children[index-1])),
+            "right_child_id" => Some(NodeInfo::U32(self.children[index+1])),
+            _ => None, 
+        }
+    }
+
 
 
     /// Persists the current node to the disk. Borrows the file from the B-Tree itself and 
@@ -114,5 +162,5 @@ impl BTreeNode {
         
         is_leaf
     }
-    
+
 }
